@@ -1,0 +1,1360 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+    AlertCircle,
+    ArrowRight,
+    Ban,
+    Building2,
+    Calendar,
+    Check,
+    CheckCircle2,
+    ChevronDown,
+    ChevronRight,
+    ChevronUp,
+    Clock,
+    CreditCard,
+    Crown,
+    ExternalLink,
+    FileText,
+    Hourglass,
+    Landmark,
+    Loader2,
+    Lock,
+    Receipt,
+
+    Search,
+    Shield,
+    ShieldCheck,
+    Smartphone,
+    Sparkles,
+    TrendingUp,
+    Wallet,
+    X,
+    Zap,
+} from "lucide-react";
+import Link from "next/link";
+import TopNavBarUser from "../../../components/navbars/TopNavBarUser";
+import { getPlanes, type Plan } from "@/data/plans";
+import { getMisBoletas, getMiMembresia, type PagosBoleta, type PagosMembresia } from "@/data/pagos";
+import { useAuthUser } from "@/context";
+import { calcularVencimiento, membresiaActiva } from "@/lib/fechas";
+
+// ─── Types ────────────────────────────────────────────────────────────
+
+type CheckoutState = "idle" | "processing" | "success" | "error";
+
+type PaymentRecord = {
+    id: string;
+    fecha: string;
+    descripcion: string;
+    monto: number;
+    estado: "aprobado" | "rechazado" | "pendiente" | "anulado";
+    metodo: "tarjeta" | "transferencia" | "wallet";
+    factura_url?: string;
+};
+
+type ActiveSubscription = {
+    plan: string;
+    planId: string;
+    estado: "activa" | "vencida" | "inactiva";
+    fecha_inicio: string;
+    fecha_vencimiento: string;
+    tokens_totales: number;
+    tokens_usados: number;
+    precio: number;
+    renovacion_automatica: boolean;
+    metodo_pago: string;
+    metodo_pago_icon: string;
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────
+
+const BENEFICIOS_BASE = [
+    "Acceso prioritario a reservas en todas nuestras sedes",
+    "Acceso completo a biblioteca de cápsulas e-learning",
+    "Análisis de métricas corporales y seguimiento de progreso",
+];
+
+function formatCLP(n: number) {
+    return `$${n.toLocaleString("es-CL")}`;
+}
+
+function formatDate(iso: string) {
+    return new Date(iso).toLocaleDateString("es-CL", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+    });
+}
+
+function daysUntil(iso: string) {
+    const diff = new Date(iso).getTime() - Date.now();
+    return Math.ceil(diff / 86400000);
+}
+
+function estadoBadge(estado: PaymentRecord["estado"]) {
+    const map = {
+        aprobado: {
+            label: "Aprobado",
+            bg: "bg-[#00A86B]/10",
+            text: "text-[#00A86B]",
+            dot: "bg-[#00A86B]",
+        },
+        rechazado: {
+            label: "Rechazado",
+            bg: "bg-[#ba1a1a]/10",
+            text: "text-[#ba1a1a]",
+            dot: "bg-[#ba1a1a]",
+        },
+        pendiente: {
+            label: "Pendiente",
+            bg: "bg-[#F28C28]/10",
+            text: "text-[#F28C28]",
+            dot: "bg-[#F28C28]",
+        },
+        anulado: {
+            label: "Anulado",
+            bg: "bg-gray-100",
+            text: "text-gray-500",
+            dot: "bg-gray-400",
+        },
+    };
+    return map[estado];
+}
+
+function metodoIcon(metodo: PaymentRecord["metodo"]) {
+    switch (metodo) {
+        case "tarjeta":
+            return <CreditCard className="w-3.5 h-3.5" />;
+        case "transferencia":
+            return <Landmark className="w-3.5 h-3.5" />;
+        case "wallet":
+            return <Wallet className="w-3.5 h-3.5" />;
+    }
+}
+
+function suscripcionColor(estado: ActiveSubscription["estado"]) {
+    switch (estado) {
+        case "activa":
+            return { bg: "bg-[#00A86B]/10", text: "text-[#00A86B]", dot: "bg-[#00A86B]", label: "Activa" };
+        case "vencida":
+            return { bg: "bg-[#ba1a1a]/10", text: "text-[#ba1a1a]", dot: "bg-[#ba1a1a]", label: "Vencida" };
+        case "inactiva":
+            return { bg: "bg-gray-100", text: "text-gray-500", dot: "bg-gray-400", label: "Sin plan" };
+    }
+}
+
+// ─── Dashboard Component ──────────────────────────────────────────────
+
+function PagosDashboard({ onNavigateCompra, userId }: { onNavigateCompra: () => void; userId: string }) {
+    const [loading, setLoading] = useState(true);
+    const [rawBoletas, setRawBoletas] = useState<PagosBoleta[]>([]);
+    const [rawMembresia, setRawMembresia] = useState<PagosMembresia | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        async function fetchData() {
+            const [boletas, membresia] = await Promise.all([
+                getMisBoletas(userId),
+                getMiMembresia(userId),
+            ]);
+            if (!cancelled) {
+                setRawBoletas(boletas);
+                setRawMembresia(membresia);
+                setLoading(false);
+            }
+        }
+        fetchData();
+        return () => { cancelled = true; };
+    }, [userId]);
+
+    const suscripcion: ActiveSubscription = useMemo(() => {
+        if (!rawMembresia) {
+            return {
+                plan: "Sin plan",
+                planId: "",
+                estado: "inactiva",
+                fecha_inicio: "",
+                fecha_vencimiento: "",
+                tokens_totales: 0,
+                tokens_usados: 0,
+                precio: 0,
+                renovacion_automatica: false,
+                metodo_pago: "—",
+                metodo_pago_icon: "credit-card",
+            };
+        }
+        const estadoSub = membresiaActiva(rawMembresia.mes) ? "activa" : "vencida";
+        return {
+            plan: rawMembresia.plan_nombre,
+            planId: rawMembresia.plan_id,
+            estado: estadoSub,
+            fecha_inicio: rawMembresia.mes,
+            fecha_vencimiento: calcularVencimiento(rawMembresia.mes).toISOString().split("T")[0],
+            tokens_totales: rawMembresia.tokens_totales,
+            tokens_usados: rawMembresia.tokens_usados,
+            precio: rawMembresia.precio,
+            renovacion_automatica: false,
+            metodo_pago: "Flow",
+            metodo_pago_icon: "visa",
+        };
+    }, [rawMembresia]);
+
+    const historial: PaymentRecord[] = useMemo(() => {
+        return rawBoletas.map((b) => {
+            const estadoMap: Record<string, PaymentRecord["estado"]> = {
+                pagado: "aprobado",
+                rechazado: "rechazado",
+                pendiente: "pendiente",
+                anulado: "anulado",
+            };
+            const descripcion = b.items
+                .map((i) => i.plan_nombre || "Producto")
+                .join(", ");
+            return {
+                id: b.id.slice(0, 8),
+                fecha: b.created_at,
+                descripcion: descripcion || `Boleta ${b.id.slice(0, 8)}`,
+                monto: b.total,
+                estado: estadoMap[b.estado] || "pendiente",
+                metodo: "tarjeta",
+            };
+        });
+    }, [rawBoletas]);
+
+    const stats = useMemo(() => {
+        const activa = suscripcion.estado === "activa";
+        const totalPagado = historial
+            .filter((p) => p.estado === "aprobado")
+            .reduce((s, p) => s + p.monto, 0);
+        const pendientes = historial.filter((p) => p.estado === "pendiente").length;
+        const rechazados = historial.filter((p) => p.estado === "rechazado").length;
+        return { activa, totalPagado, pendientes, rechazados };
+    }, [suscripcion, historial]);
+
+    const sc = suscripcionColor(suscripcion.estado);
+    const pctTokens = suscripcion.tokens_totales > 0
+        ? Math.round((suscripcion.tokens_usados / suscripcion.tokens_totales) * 100)
+        : 0;
+
+    const [busqueda, setBusqueda] = useState("");
+    const [filtroEstado, setFiltroEstado] = useState<"todos" | PaymentRecord["estado"]>("todos");
+
+    const historialFiltrado = useMemo(() => {
+        return historial.filter((p) => {
+            const matchBusqueda =
+                p.descripcion.toLowerCase().includes(busqueda.toLowerCase()) ||
+                p.id.toLowerCase().includes(busqueda.toLowerCase());
+            const matchEstado = filtroEstado === "todos" || p.estado === filtroEstado;
+            return matchBusqueda && matchEstado;
+        });
+    }, [historial, busqueda, filtroEstado]);
+
+    if (loading) {
+        return (
+            <div className="flex-1 flex items-center justify-center">
+                <div className="flex flex-col items-center gap-4">
+                    <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-[#F28C28]" />
+                    <p className="text-gray-500 font-medium">Cargando tus pagos...</p>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex-1 w-full max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-10 space-y-8">
+            {/* Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                    <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#001c37] to-[#00305B] flex items-center justify-center shadow-lg">
+                            <Receipt className="w-5 h-5 text-[#F28C28]" />
+                        </div>
+                        <div>
+                            <h1 className="text-2xl md:text-3xl font-black text-[#00305B] tracking-tight">
+                            Pagos y suscripción
+                            </h1>
+                            <p className="text-gray-500 text-sm mt-0.5">
+                                Administra tu plan, revisa tus pagos e historial de facturación.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            {/* Stats cards */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="bg-white rounded-2xl p-5 border border-[#edeef0] shadow-sm">
+                    <div className="flex items-center justify-between mb-3">
+                        <span className="text-[10px] font-black uppercase tracking-wider text-gray-400">
+                            Membresía
+                        </span>
+                        <div className={`w-8 h-8 rounded-lg ${sc.bg} flex items-center justify-center`}>
+                            <Shield className={`w-4 h-4 ${sc.text}`} />
+                        </div>
+                    </div>
+                    <p className="text-lg font-black text-[#00305B] capitalize">{suscripcion.plan}</p>
+                    <div className="flex items-center gap-1.5 mt-1">
+                        <span className={`w-2 h-2 rounded-full ${sc.dot}`} />
+                        <span className={`text-xs font-bold ${sc.text}`}>{sc.label}</span>
+                    </div>
+                </div>
+
+                <div className="bg-white rounded-2xl p-5 border border-[#edeef0] shadow-sm">
+                    <div className="flex items-center justify-between mb-3">
+                        <span className="text-[10px] font-black uppercase tracking-wider text-gray-400">
+                            Total pagado
+                        </span>
+                        <div className="w-8 h-8 rounded-lg bg-[#00A86B]/10 flex items-center justify-center">
+                            <TrendingUp className="w-4 h-4 text-[#00A86B]" />
+                        </div>
+                    </div>
+                    <p className="text-lg font-black text-[#00305B]">{formatCLP(stats.totalPagado)}</p>
+                    <p className="text-xs text-gray-400 mt-1">
+                        {historial.filter((p) => p.estado === "aprobado").length} transacciones
+                    </p>
+                </div>
+
+                <div className="bg-white rounded-2xl p-5 border border-[#edeef0] shadow-sm">
+                    <div className="flex items-center justify-between mb-3">
+                        <span className="text-[10px] font-black uppercase tracking-wider text-gray-400">
+                            Pendientes
+                        </span>
+                        <div className="w-8 h-8 rounded-lg bg-[#F28C28]/10 flex items-center justify-center">
+                            <Clock className="w-4 h-4 text-[#F28C28]" />
+                        </div>
+                    </div>
+                    <p className="text-lg font-black text-[#00305B]">{stats.pendientes}</p>
+                    <p className="text-xs text-gray-400 mt-1">por confirmar</p>
+                </div>
+
+                <div className="bg-white rounded-2xl p-5 border border-[#edeef0] shadow-sm">
+                    <div className="flex items-center justify-between mb-3">
+                        <span className="text-[10px] font-black uppercase tracking-wider text-gray-400">
+                            Rechazados
+                        </span>
+                        <div className="w-8 h-8 rounded-lg bg-[#ba1a1a]/10 flex items-center justify-center">
+                            <Ban className="w-4 h-4 text-[#ba1a1a]" />
+                        </div>
+                    </div>
+                    <p className="text-lg font-black text-[#00305B]">{stats.rechazados}</p>
+                    <p className="text-xs text-gray-400 mt-1">sin éxito</p>
+                </div>
+            </div>
+
+            {/* Active subscription + Next billing */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Active plan card */}
+                <div className="lg:col-span-2 bg-white rounded-2xl md:rounded-3xl shadow-[0_8px_32px_-4px_rgba(25,28,30,0.06)] border border-[#edeef0] p-6 md:p-8">
+                    <div className="flex items-start justify-between mb-6">
+                        <div className="flex items-center gap-4">
+                            <div className="bg-gradient-to-br from-[#001c37] to-[#00305B] p-3.5 rounded-2xl shadow-lg">
+                                <Crown className="w-7 h-7 text-[#F28C28]" />
+                            </div>
+                            <div>
+                                <div className="flex items-center gap-2">
+                                    <h2 className="text-xl font-black text-[#00305B] capitalize">
+                                        {suscripcion.plan}
+                                    </h2>
+                                    <span
+                                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${sc.bg} ${sc.text} border border-current/20`}
+                                    >
+                                        {sc.label}
+                                    </span>
+                                </div>
+                                <p className="text-gray-500 text-sm mt-0.5">
+                                    {formatCLP(suscripcion.precio)} / mes
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Token progress */}
+                    <div className="space-y-2 mb-6">
+                        <div className="flex items-center justify-between text-sm">
+                            <span className="text-gray-500 font-medium">Tokens del mes</span>
+                            <span className="font-bold text-[#00305B]">
+                                {suscripcion.tokens_usados}/{suscripcion.tokens_totales} usados
+                            </span>
+                        </div>
+                        <div className="h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                            <div
+                                className="h-full rounded-full bg-gradient-to-r from-[#F28C28] to-[#e07d1f] transition-all duration-700"
+                                style={{ width: `${pctTokens}%` }}
+                            />
+                        </div>
+                        <p className="text-[11px] text-gray-400">
+                            {suscripcion.tokens_totales - suscripcion.tokens_usados} tokens disponibles
+                        </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                        <div className="bg-gray-50 rounded-xl p-3.5">
+                            <p className="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1">
+                                Inicio
+                            </p>
+                            <p className="text-sm font-bold text-[#00305B]">
+                                {formatDate(suscripcion.fecha_inicio)}
+                            </p>
+                        </div>
+                        <div className="bg-gray-50 rounded-xl p-3.5">
+                            <p className="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1">
+                                Vencimiento
+                            </p>
+                            <p className="text-sm font-bold text-[#00305B]">
+                                {formatDate(suscripcion.fecha_vencimiento)}
+                            </p>
+                        </div>
+                        <div className="bg-gray-50 rounded-xl p-3.5 col-span-2 sm:col-span-1">
+                            <p className="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1">
+                                Método de pago
+                            </p>
+                            <p className="text-sm font-bold text-[#00305B]">
+                                {suscripcion.metodo_pago}
+                            </p>
+                        </div>
+                    </div>
+
+                    {/* Next billing */}
+                    {suscripcion.estado === "activa" && (
+                        <div className="mt-5 flex items-center gap-3 bg-[#F28C28]/5 border border-[#F28C28]/15 rounded-xl px-4 py-3">
+                            <Calendar className="w-4 h-4 text-[#F28C28] shrink-0" />
+                            <p className="text-sm text-[#00305B]">
+                                <span className="font-bold">Próximo cobro:</span>{" "}
+                                {formatDate(suscripcion.fecha_vencimiento)}{" "}
+                                <span className="text-gray-400">
+                                    ({daysUntil(suscripcion.fecha_vencimiento)} días)
+                                </span>
+                            </p>
+                        </div>
+                    )}
+                </div>
+
+                {/* Quick summary card */}
+                <div className="bg-gradient-to-br from-[#001c37] to-[#00305B] rounded-2xl md:rounded-3xl p-6 md:p-8 text-white relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-48 h-48 bg-[#F28C28] rounded-full mix-blend-multiply filter blur-3xl opacity-20 -translate-y-1/2 translate-x-1/4" />
+                    <div className="absolute bottom-0 left-0 w-48 h-48 bg-blue-500 rounded-full mix-blend-multiply filter blur-3xl opacity-20 translate-y-1/2 -translate-x-1/4" />
+
+                    <div className="relative z-10 space-y-6">
+                        <div>
+                            <p className="text-[10px] font-black uppercase tracking-wider text-white/50 mb-1">
+                                Resumen rápido
+                            </p>
+                            <h3 className="text-lg font-bold">
+                                {stats.activa ? "Todo al día" : "Sin membresía activa"}
+                            </h3>
+                        </div>
+
+                        <div className="space-y-4">
+                            <div className="flex items-center justify-between">
+                                <span className="text-sm text-white/70">Facturas pagadas</span>
+                                <span className="text-sm font-bold">
+                                    {historial.filter((p) => p.estado === "aprobado").length}
+                                </span>
+                            </div>
+                            <div className="h-px bg-white/10" />
+                            <div className="flex items-center justify-between">
+                                <span className="text-sm text-white/70">Membresía activa</span>
+                                <span
+                                    className={`text-sm font-bold ${stats.activa ? "text-[#00A86B]" : "text-[#ba1a1a]"}`}
+                                >
+                                    {stats.activa ? "Sí" : "No"}
+                                </span>
+                            </div>
+                            <div className="h-px bg-white/10" />
+                            <div className="flex items-center justify-between">
+                                <span className="text-sm text-white/70">Próximo vencimiento</span>
+                                <span className="text-sm font-bold">
+                                    {suscripcion.estado === "activa"
+                                        ? formatDate(suscripcion.fecha_vencimiento)
+                                        : "—"}
+                                </span>
+                            </div>
+                            <div className="h-px bg-white/10" />
+                            <div className="flex items-center justify-between">
+                                <span className="text-sm text-white/70">Renovación automática</span>
+                                <span className="text-sm font-bold">
+                                    {suscripcion.renovacion_automatica ? "Activada" : "Desactivada"}
+                                </span>
+                            </div>
+                        </div>
+
+
+                    </div>
+                </div>
+            </div>
+
+            {/* Payment history */}
+            <div className="bg-white rounded-2xl md:rounded-3xl shadow-[0_8px_32px_-4px_rgba(25,28,30,0.06)] border border-[#edeef0] overflow-hidden">
+                {/* Filters */}
+                <div className="p-6 md:p-8 border-b border-gray-100">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-5">
+                        <div>
+                            <h3 className="text-lg font-black text-[#00305B]">Historial de pagos</h3>
+                            <p className="text-sm text-gray-500 mt-0.5">
+                                {historial.length} transacciones registradas
+                            </p>
+                        </div>
+
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-3">
+                        <div className="relative flex-1">
+                            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                            <input
+                                type="text"
+                                value={busqueda}
+                                onChange={(e) => setBusqueda(e.target.value)}
+                                placeholder="Buscar por descripción o factura..."
+                                className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-800 placeholder-gray-400 outline-none focus:border-[#F28C28]/50 focus:bg-white focus:ring-4 focus:ring-[#F28C28]/10 transition-all"
+                            />
+                        </div>
+                        <div className="flex gap-2">
+                            {(["todos", "aprobado", "pendiente", "rechazado", "anulado"] as const).map(
+                                (f) => (
+                                    <button
+                                        key={f}
+                                        onClick={() => setFiltroEstado(f)}
+                                        className={`px-3.5 py-2 rounded-xl text-xs font-bold tracking-wide transition-all capitalize ${
+                                            filtroEstado === f
+                                                ? "bg-[#00305B] text-white shadow-md"
+                                                : "bg-gray-50 text-gray-500 hover:bg-gray-100 border border-gray-200"
+                                        }`}
+                                    >
+                                        {f === "todos" ? "Todos" : f}
+                                    </button>
+                                ),
+                            )}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Table */}
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse min-w-[600px]">
+                        <thead>
+                            <tr className="border-b border-gray-100 bg-gray-50/50">
+                                <th className="px-6 md:px-8 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400">
+                                    Factura
+                                </th>
+                                <th className="px-6 md:px-8 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400">
+                                    Descripción
+                                </th>
+                                <th className="px-6 md:px-8 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400">
+                                    Fecha
+                                </th>
+                                <th className="px-6 md:px-8 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400">
+                                    Monto
+                                </th>
+                                <th className="px-6 md:px-8 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400">
+                                    Estado
+                                </th>
+                                <th className="px-6 md:px-8 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400">
+                                    Método
+                                </th>
+                                <th className="px-6 md:px-8 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400">
+                                    Acción
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-50">
+                            {historialFiltrado.length === 0 ? (
+                                <tr>
+                                    <td colSpan={7} className="px-8 py-16 text-center">
+                                        <Search className="w-10 h-10 text-gray-300 mx-auto mb-3" />
+                                        <p className="text-gray-500 font-medium">
+                                            No se encontraron transacciones
+                                        </p>
+                                        <p className="text-sm text-gray-400 mt-1">
+                                            Intenta con otros filtros de búsqueda.
+                                        </p>
+                                    </td>
+                                </tr>
+                            ) : (
+                                historialFiltrado.map((pago) => {
+                                    const badge = estadoBadge(pago.estado);
+                                    return (
+                                        <tr
+                                            key={pago.id}
+                                            className="hover:bg-gray-50/80 transition-colors"
+                                        >
+                                            <td className="px-6 md:px-8 py-4">
+                                                <span className="text-sm font-bold text-[#00305B]">
+                                                    {pago.id}
+                                                </span>
+                                            </td>
+                                            <td className="px-6 md:px-8 py-4">
+                                                <span className="text-sm text-gray-700">
+                                                    {pago.descripcion}
+                                                </span>
+                                            </td>
+                                            <td className="px-6 md:px-8 py-4">
+                                                <span className="text-sm text-gray-500">
+                                                    {formatDate(pago.fecha)}
+                                                </span>
+                                            </td>
+                                            <td className="px-6 md:px-8 py-4">
+                                                <span className="text-sm font-bold text-[#00305B]">
+                                                    {formatCLP(pago.monto)}
+                                                </span>
+                                            </td>
+                                            <td className="px-6 md:px-8 py-4">
+                                                <span
+                                                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${badge.bg} ${badge.text}`}
+                                                >
+                                                    <span className={`w-1.5 h-1.5 rounded-full ${badge.dot}`} />
+                                                    {badge.label}
+                                                </span>
+                                            </td>
+                                            <td className="px-6 md:px-8 py-4">
+                                                <span className="flex items-center gap-1.5 text-sm text-gray-500">
+                                                    {metodoIcon(pago.metodo)}
+                                                    <span className="capitalize">{pago.metodo}</span>
+                                                </span>
+                                            </td>
+                                            <td className="px-6 md:px-8 py-4">
+                                                {pago.factura_url ? (
+                                                    <button className="flex items-center gap-1.5 text-sm font-semibold text-[#00305B] hover:text-[#F28C28] transition-colors">
+                                                        <FileText className="w-3.5 h-3.5" />
+                                                        Factura
+                                                        <ExternalLink className="w-3 h-3" />
+                                                    </button>
+                                                ) : (
+                                                    <span className="text-sm text-gray-300">—</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+
+                {/* Footer */}
+                <div className="px-6 md:px-8 py-4 border-t border-gray-100 bg-gray-50/30 flex items-center justify-between">
+                    <p className="text-xs text-gray-400">
+                        Mostrando {historialFiltrado.length} de {historial.length} transacciones
+                    </p>
+                    <div className="flex items-center gap-2">
+                        <button className="px-3 py-1.5 text-xs font-bold text-gray-500 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all disabled:opacity-40">
+                            Anterior
+                        </button>
+                        <button className="px-3 py-1.5 text-xs font-bold text-white bg-[#00305B] rounded-lg hover:bg-[#001c37] transition-all">
+                            1
+                        </button>
+                        <button className="px-3 py-1.5 text-xs font-bold text-gray-500 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-all disabled:opacity-40">
+                            Siguiente
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    );
+}
+
+// ─── Checkout View ────────────────────────────────────────────────────
+
+function CheckoutView({
+    plan,
+    onBack,
+}: {
+    plan: Plan;
+    onBack: () => void;
+}) {
+    const router = useRouter();
+    const [checkoutState, setCheckoutState] = useState<CheckoutState>("idle");
+    const [aceptaTerminos, setAceptaTerminos] = useState(false);
+    const [errorMsg, setErrorMsg] = useState("");
+    const [pagoAutomatico, setPagoAutomatico] = useState(false);
+
+    const handlePagar = useCallback(async () => {
+        setCheckoutState("processing");
+        setErrorMsg("");
+        try {
+            const res = await fetch("/api/flow/create-order", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    planId: plan.id,
+                    recurrencia: pagoAutomatico,
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "Error al crear orden");
+            sessionStorage.setItem("flowBoletaId", data.boletaId);
+            window.location.replace(data.url);
+        } catch (err) {
+            setErrorMsg(err instanceof Error ? err.message : "Error al conectar con Flow");
+            setCheckoutState("error");
+        }
+    }, [plan.id, pagoAutomatico]);
+
+    const resetCheckout = useCallback(() => {
+        setCheckoutState("idle");
+    }, []);
+
+    const renderPlanIcon = (nombre: string) => {
+        const lower = nombre.toLowerCase();
+        if (lower.includes("pro")) return <Shield className="w-12 h-12 text-[#F28C28]" />;
+        if (lower.includes("vip") || lower.includes("premium"))
+            return <Crown className="w-12 h-12 text-yellow-400" />;
+        return <Zap className="w-12 h-12 text-gray-400" />;
+    };
+
+    return (
+        <>
+            <div className="flex-1 w-full max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-10">
+                <div className="flex items-center gap-4 mb-8">
+                    <div>
+                        <h1 className="text-2xl md:text-3xl font-black text-[#00305B] tracking-tight">
+                            Finalizar compra
+                        </h1>
+                        <p className="text-gray-500 text-sm mt-0.5">
+                            Revisa los detalles y confirma tu plan
+                        </p>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 lg:gap-8">
+                    <div className="lg:col-span-3 space-y-6">
+                        <div className="bg-white rounded-2xl md:rounded-3xl shadow-[0_8px_32px_-4px_rgba(25,28,30,0.06)] border border-[#edeef0] p-6 md:p-8">
+                            <div className="flex items-start gap-4 md:gap-6">
+                                <div className="bg-gradient-to-br from-[#001c37] to-[#00305B] p-4 rounded-2xl shrink-0 shadow-lg">
+                                    {renderPlanIcon(plan.nombre)}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <h2 className="text-xl md:text-2xl font-black text-[#00305B] capitalize">
+                                            {plan.nombre}
+                                        </h2>
+                                        <span className="px-2.5 py-0.5 bg-[#F28C28]/10 text-[#F28C28] text-[10px] font-bold uppercase tracking-wider rounded-full border border-[#F28C28]/20">
+                                            Mensual
+                                        </span>
+                                    </div>
+                                    <div className="flex items-baseline gap-1 mt-3">
+                                        <span className="text-4xl md:text-5xl font-black text-[#00305B]">
+                                            {formatCLP(plan.precio ?? 0)}
+                                        </span>
+                                        <span className="text-gray-400 font-medium">/mes</span>
+                                    </div>
+                                    <p className="text-gray-500 mt-2 text-sm">
+                                        <span className="font-bold text-[#F28C28]">
+                                            {plan.tokens_mensuales} Tokens
+                                        </span>{" "}
+                                        mensuales para canjear por clases y eventos.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="bg-white rounded-2xl md:rounded-3xl shadow-[0_8px_32px_-4px_rgba(25,28,30,0.06)] border border-[#edeef0] p-6 md:p-8">
+                            <h3 className="text-sm font-black uppercase tracking-wider text-gray-400 mb-5">
+                                Beneficios incluidos
+                            </h3>
+                            <div className="space-y-4">
+                                <div className="flex items-start gap-3">
+                                    <div className="w-7 h-7 rounded-full bg-[#00A86B]/10 flex items-center justify-center shrink-0 mt-0.5">
+                                        <CheckCircle2 className="w-4 h-4 text-[#00A86B]" />
+                                    </div>
+                                    <p className="text-gray-700">
+                                        <span className="font-bold">{plan.tokens_mensuales} Tokens</span>{" "}
+                                        mensuales para canjear por clases y eventos.
+                                    </p>
+                                </div>
+                                {BENEFICIOS_BASE.map((b, i) => (
+                                    <div key={i} className="flex items-start gap-3">
+                                        <div className="w-7 h-7 rounded-full bg-[#00A86B]/10 flex items-center justify-center shrink-0 mt-0.5">
+                                            <CheckCircle2 className="w-4 h-4 text-[#00A86B]" />
+                                        </div>
+                                        <p className="text-gray-700">{b}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-3 items-center text-xs text-gray-400">
+                            <div className="flex items-center gap-1.5 bg-white px-3 py-2 rounded-xl border border-[#edeef0]">
+                                <Lock className="w-3.5 h-3.5 text-[#00A86B]" />
+                                Pago seguro SSL
+                            </div>
+                            <div className="flex items-center gap-1.5 bg-white px-3 py-2 rounded-xl border border-[#edeef0]">
+                                <ShieldCheck className="w-3.5 h-3.5 text-[#00305B]" />
+                                Datos protegidos
+                            </div>
+                            <div className="flex items-center gap-1.5 bg-white px-3 py-2 rounded-xl border border-[#edeef0]">
+                                <Building2 className="w-3.5 h-3.5 text-gray-400" />
+                                Flow / Webpay
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="lg:col-span-2 space-y-6">
+                        <div className="bg-white rounded-2xl md:rounded-3xl shadow-[0_8px_32px_-4px_rgba(25,28,30,0.06)] border border-[#edeef0] p-6 md:p-8">
+                            <h3 className="text-sm font-black uppercase tracking-wider text-gray-400 mb-5">
+                                Resumen de compra
+                            </h3>
+                            <div className="space-y-3">
+                                <div className="flex justify-between items-start">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <Crown className="w-4 h-4 text-[#F28C28] shrink-0" />
+                                        <span className="text-gray-700 font-medium truncate capitalize">
+                                            Plan {plan.nombre}
+                                        </span>
+                                    </div>
+                                    <span className="text-gray-900 font-bold shrink-0 ml-2">
+                                        {formatCLP(plan.precio ?? 0)}
+                                    </span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                    <span className="text-gray-400">Tokens mensuales</span>
+                                    <span className="text-gray-700 font-semibold">
+                                        {plan.tokens_mensuales}
+                                    </span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                    <span className="text-gray-400">Duración</span>
+                                    <span className="text-gray-700 font-semibold">1 mes</span>
+                                </div>
+                            </div>
+                            <div className="border-t border-gray-100 mt-5 pt-5">
+                                <div className="flex justify-between items-baseline">
+                                    <span className="text-gray-900 font-bold text-lg">Total</span>
+                                    <span className="text-2xl font-black text-[#00305B]">
+                                        {formatCLP(plan.precio ?? 0)}
+                                    </span>
+                                </div>
+                                <p className="text-[11px] text-gray-400 mt-1">
+                                    IVA incluido. Factura electrónica disponible.
+                                </p>
+                            </div>
+                        </div>
+
+                        {/* Toggle pago automático */}
+                        <div className="bg-white rounded-xl border border-[#edeef0] p-4 flex items-start gap-3">
+                            <button
+                                onClick={() => setPagoAutomatico(!pagoAutomatico)}
+                                className={`relative shrink-0 mt-0.5 inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                                    pagoAutomatico ? "bg-[#00A86B]" : "bg-gray-200"
+                                }`}
+                            >
+                                <span
+                                    className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                                        pagoAutomatico ? "translate-x-6" : "translate-x-1"
+                                    }`}
+                                />
+                            </button>
+                            <div>
+                                <p className="text-sm font-bold text-[#00305B]">
+                                    Pago automático mensual
+                                </p>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                    Activa esta opción para que Flow cobre tu plan automáticamente
+                                    cada mes. No necesitarás volver a pagar manualmente.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="space-y-4">
+                            <label className="flex items-start gap-3 cursor-pointer group">
+                                <input
+                                    type="checkbox"
+                                    checked={aceptaTerminos}
+                                    onChange={(e) => setAceptaTerminos(e.target.checked)}
+                                    className="mt-0.5 w-4 h-4 rounded border-gray-300 text-[#F28C28] focus:ring-[#F28C28]/30 accent-[#F28C28]"
+                                />
+                                <span className="text-xs text-gray-500 group-hover:text-gray-700 transition-colors">
+                                    Acepto los{" "}
+                                    <span className="text-[#00305B] font-semibold underline underline-offset-2">
+                                        términos y condiciones
+                                    </span>{" "}
+                                    y la{" "}
+                                    <span className="text-[#00305B] font-semibold underline underline-offset-2">
+                                        política de privacidad
+                                    </span>
+                                    . El cobro se realizará de forma inmediata al confirmar la compra.
+                                </span>
+                            </label>
+
+                            <button
+                                onClick={handlePagar}
+                                disabled={!aceptaTerminos}
+                                className={`w-full py-4 rounded-xl font-bold text-lg transition-all duration-300 flex items-center justify-center gap-2 ${
+                                    aceptaTerminos
+                                        ? "bg-gradient-to-r from-[#F28C28] to-[#e07d1f] text-white shadow-lg shadow-[#F28C28]/30 hover:shadow-xl hover:shadow-[#F28C28]/40 hover:-translate-y-0.5 active:translate-y-0"
+                                        : "bg-gray-200 text-gray-400 cursor-not-allowed"
+                                }`}
+                            >
+                                Pagar {formatCLP(plan.precio ?? 0)}
+                                <ChevronRight className="w-5 h-5" />
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Processing overlay */}
+            {checkoutState === "processing" && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-[#001220]/60 backdrop-blur-sm" />
+                    <div className="relative bg-white rounded-3xl shadow-2xl p-10 md:p-14 max-w-sm w-full text-center animate-in fade-in zoom-in-95 duration-300">
+                        <div className="animate-spin rounded-full h-14 w-14 border-b-2 border-[#F28C28] mx-auto" />
+                        <h3 className="text-xl font-black text-[#00305B] mt-6 mb-2">
+                            Procesando pago
+                        </h3>
+                        <p className="text-gray-500 text-sm">
+                            Estamos procesando tu pago de forma segura. No cierres esta ventana.
+                        </p>
+                        <div className="flex justify-center gap-1 mt-6">
+                            <span
+                                className="w-2 h-2 rounded-full bg-[#F28C28] animate-bounce"
+                                style={{ animationDelay: "0ms" }}
+                            />
+                            <span
+                                className="w-2 h-2 rounded-full bg-[#F28C28] animate-bounce"
+                                style={{ animationDelay: "150ms" }}
+                            />
+                            <span
+                                className="w-2 h-2 rounded-full bg-[#F28C28] animate-bounce"
+                                style={{ animationDelay: "300ms" }}
+                            />
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Success overlay */}
+            {checkoutState === "success" && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-[#001220]/60 backdrop-blur-sm" />
+                    <div className="relative bg-white rounded-3xl shadow-2xl p-10 md:p-14 max-w-sm w-full text-center animate-in fade-in zoom-in-95 duration-300">
+                        <div className="w-20 h-20 rounded-full bg-[#00A86B]/10 flex items-center justify-center mx-auto">
+                            <CheckCircle2 className="w-10 h-10 text-[#00A86B]" />
+                        </div>
+                        <h3 className="text-xl font-black text-[#00305B] mt-6 mb-2">
+                            ¡Pago exitoso!
+                        </h3>
+                        <p className="text-gray-500 text-sm">
+                            Tu plan{" "}
+                            <span className="font-bold text-[#00305B] capitalize">{plan.nombre}</span>{" "}
+                            ha sido activado correctamente. Ya puedes disfrutar de todos los
+                            beneficios.
+                        </p>
+                        <button
+                            onClick={() => router.push("/dashboard")}
+                            className="mt-8 w-full py-3.5 rounded-xl bg-gradient-to-r from-[#00A86B] to-[#009960] text-white font-bold shadow-lg shadow-[#00A86B]/30 hover:shadow-xl hover:shadow-[#00A86B]/40 transition-all"
+                        >
+                            Ir al Dashboard
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Error overlay */}
+            {checkoutState === "error" && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-[#001220]/60 backdrop-blur-sm" />
+                    <div className="relative bg-white rounded-3xl shadow-2xl p-10 md:p-14 max-w-sm w-full text-center animate-in fade-in zoom-in-95 duration-300">
+                        <div className="w-20 h-20 rounded-full bg-red-500/10 flex items-center justify-center mx-auto">
+                            <AlertCircle className="w-10 h-10 text-[#ba1a1a]" />
+                        </div>
+                        <h3 className="text-xl font-black text-[#00305B] mt-6 mb-2">
+                            Error en el pago
+                        </h3>
+                        <p className="text-gray-500 text-sm">
+                            {errorMsg || "No se pudo procesar tu pago. Revisa los datos e intenta nuevamente."}
+                        </p>
+                        <div className="flex flex-col gap-3 mt-8">
+                            <button
+                                onClick={resetCheckout}
+                                className="w-full py-3.5 rounded-xl bg-[#F28C28] hover:bg-[#e07d1f] text-white font-bold transition-all"
+                            >
+                                Intentar nuevamente
+                            </button>
+                            <button
+                                onClick={() => router.push("/planes")}
+                                className="text-sm text-gray-500 hover:text-[#00305B] font-semibold transition-colors"
+                            >
+                                Volver a planes
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </>
+    );
+}
+
+// ─── Main Entry Point ─────────────────────────────────────────────────
+
+export default function PagosClient() {
+    const router = useRouter();
+    const searchParams = useSearchParams();
+    const { usuario } = useAuthUser();
+    const planId = searchParams.get("id");
+    const flowToken = searchParams.get("token");
+    const flowPayment = searchParams.get("flowPayment");
+    const flowReturn = searchParams.get("flowReturn");
+
+    // ── All hooks FIRST (before any early return) ──
+    const [planes, setPlanes] = useState<Plan[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [confirmingPayment, setConfirmingPayment] = useState(true);
+    const [confirmError, setConfirmError] = useState("");
+    const [confirmPending, setConfirmPending] = useState(false);
+    const [tienePlanActivo, setTienePlanActivo] = useState(false);
+
+    const flowBoletaId = useMemo(() => {
+        if (typeof window === "undefined") return null;
+        return searchParams.get("boletaId") || sessionStorage.getItem("flowBoletaId");
+    }, [searchParams]);
+
+    useEffect(() => {
+        if (!planId || !usuario) {
+            setLoading(false);
+            return;
+        }
+        let cancelled = false;
+        const fetchPlanes = async () => {
+            try {
+                const [planesData, membresia] = await Promise.all([
+                    getPlanes(),
+                    getMiMembresia(usuario.id),
+                ]);
+                if (cancelled) return;
+                setPlanes(planesData);
+                if (membresia) {
+                    setTienePlanActivo(membresiaActiva(membresia.mes));
+                }
+            } catch (err) {
+                console.error("Error obteniendo datos:", err);
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        };
+        fetchPlanes();
+        const timeout = setTimeout(() => {
+            if (!cancelled) setLoading(false);
+        }, 10000);
+        return () => {
+            cancelled = true;
+            clearTimeout(timeout);
+        };
+    }, [planId, usuario]);
+
+    useEffect(() => {
+        const shouldConfirm = flowToken || flowReturn;
+        if (!shouldConfirm) {
+            setConfirmingPayment(false);
+            return;
+        }
+        if (!flowBoletaId) {
+            console.warn("Sin boletaId — saltando confirmación (webhook async)");
+            setConfirmingPayment(false);
+            return;
+        }
+        const confirm = async () => {
+            try {
+                const url = new URL("/api/flow/confirm", window.location.origin);
+                url.searchParams.set("boletaId", flowBoletaId);
+                if (flowToken && flowToken !== "{token}") {
+                    url.searchParams.set("token", flowToken);
+                }
+
+                let attempts = 0;
+                const maxAttempts = 15;
+
+                const poll = async (): Promise<void> => {
+                    const res = await fetch(url.toString());
+                    const data = await res.json();
+
+                    if (!res.ok || data.error) {
+                        setConfirmError(data.error || "Error al confirmar pago");
+                        return;
+                    }
+                    if (data.estado === "pagado") {
+                        return;
+                    }
+                    if (data.estado !== "pendiente") {
+                        setConfirmError(`Estado inesperado: ${data.estado}`);
+                        return;
+                    }
+                    if (attempts < maxAttempts) {
+                        attempts++;
+                        await new Promise((r) => setTimeout(r, 3000));
+                        return poll();
+                    }
+                    setConfirmPending(true);
+                };
+
+                await poll();
+            } catch {
+                setConfirmError("Error de conexión al confirmar pago");
+            } finally {
+                setConfirmingPayment(false);
+            }
+        };
+        confirm();
+    }, [flowToken, flowBoletaId, flowReturn]);
+
+    // On mount (and BFCache restore via pageshow):
+    // if user returned from Flow without paying (flowBoletaId in sessionStorage, no token in URL),
+    // cancel the boleta (best-effort, async) and redirect to /planes immediately.
+    useEffect(() => {
+        const redirectIfOrphaned = () => {
+            if (flowToken || flowPayment || flowReturn) return;
+            const boletaIdInUrl = searchParams.get("boletaId");
+            if (boletaIdInUrl) return;
+            const boletaId = sessionStorage.getItem("flowBoletaId");
+            if (!boletaId) return;
+            sessionStorage.removeItem("flowBoletaId");
+            fetch("/api/flow/cancel", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ boletaId }),
+            }).catch(() => {});
+            window.location.href = "/planes";
+        };
+        redirectIfOrphaned();
+        window.addEventListener("pageshow", (e) => {
+            if (e.persisted) redirectIfOrphaned();
+        });
+    }, []);
+
+    const plan = useMemo(
+        () => planes.find((p) => p.id === planId) ?? null,
+        [planes, planId],
+    );
+
+    const handleBackToDashboard = useCallback(() => {
+        const params = new URLSearchParams(window.location.search);
+        params.delete("id");
+        const newUrl = params.toString()
+            ? `${window.location.pathname}?${params.toString()}`
+            : window.location.pathname;
+        window.history.pushState({}, "", newUrl);
+    }, []);
+
+    const handleFlowReturn = useCallback(() => {
+        sessionStorage.removeItem("flowBoletaId");
+        const params = new URLSearchParams(window.location.search);
+        params.delete("token");
+        params.delete("flowPayment");
+        params.delete("flowOrder");
+        params.delete("boletaId");
+        const newUrl = params.toString()
+            ? `${window.location.pathname}?${params.toString()}`
+            : window.location.pathname;
+        window.history.pushState({}, "", newUrl);
+    }, []);
+
+    // ── Retorno desde Flow (token o flowReturn en URL) ──
+    if (flowToken || flowPayment || flowReturn) {
+        return (
+            <main className="min-h-screen bg-[#f8f9fb] flex flex-col">
+                <TopNavBarUser />
+                <div className="flex-1 flex items-center justify-center p-4">
+                    {confirmingPayment ? (
+                        <div className="bg-white rounded-3xl shadow-2xl p-10 md:p-14 max-w-sm w-full text-center">
+                            <div className="animate-spin rounded-full h-14 w-14 border-b-2 border-[#F28C28] mx-auto" />
+                            <h3 className="text-xl font-black text-[#00305B] mt-6 mb-2">
+                                Confirmando pago
+                            </h3>
+                            <p className="text-gray-500 text-sm">
+                                Estamos verificando el pago con Flow. Un momento por favor...
+                            </p>
+                        </div>
+                    ) : confirmPending ? (
+                        <div className="bg-white rounded-3xl shadow-2xl p-10 md:p-14 max-w-sm w-full text-center">
+                            <div className="w-20 h-20 rounded-full bg-[#F28C28]/10 flex items-center justify-center mx-auto">
+                                <Hourglass className="w-10 h-10 text-[#F28C28]" />
+                            </div>
+                            <h3 className="text-xl font-black text-[#00305B] mt-6 mb-2">
+                                Pago pendiente
+                            </h3>
+                            <p className="text-gray-500 text-sm">
+                                No pudimos verificar tu pago automáticamente. Si completaste el pago, se confirmará en segundos. Si cancelaste la compra en el banco, cancélala aquí:
+                            </p>
+                            <div className="flex flex-col gap-3 mt-8">
+                                <button
+                                    onClick={async () => {
+                                        const bId = sessionStorage.getItem("flowBoletaId");
+                                        if (bId) {
+                                            await fetch("/api/flow/cancel", {
+                                                method: "POST",
+                                                headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify({ boletaId: bId }),
+                                            });
+                                            sessionStorage.removeItem("flowBoletaId");
+                                        }
+                                        handleFlowReturn();
+                                    }}
+                                    className="w-full py-3.5 rounded-xl bg-red-500 hover:bg-red-600 text-white font-bold transition-all"
+                                >
+                                    Cancelar compra
+                                </button>
+                                <button
+                                    onClick={() => window.location.reload()}
+                                    className="w-full py-3.5 rounded-xl bg-[#F28C28] hover:bg-[#e07d1f] text-white font-bold transition-all"
+                                >
+                                    Reintentar
+                                </button>
+                                <button
+                                    onClick={handleFlowReturn}
+                                    className="text-sm text-gray-500 hover:text-[#00305B] font-semibold transition-colors"
+                                >
+                                    Ir al Dashboard
+                                </button>
+                            </div>
+                        </div>
+                    ) : confirmError ? (
+                        <div className="bg-white rounded-3xl shadow-2xl p-10 md:p-14 max-w-sm w-full text-center">
+                            <div className="w-20 h-20 rounded-full bg-red-500/10 flex items-center justify-center mx-auto">
+                                <AlertCircle className="w-10 h-10 text-[#ba1a1a]" />
+                            </div>
+                            <h3 className="text-xl font-black text-[#00305B] mt-6 mb-2">
+                                Error de confirmación
+                            </h3>
+                            <p className="text-gray-500 text-sm">
+                                {confirmError}
+                            </p>
+                            <div className="flex flex-col gap-3 mt-8">
+                                <button
+                                    onClick={() => window.location.reload()}
+                                    className="w-full py-3.5 rounded-xl bg-[#F28C28] hover:bg-[#e07d1f] text-white font-bold transition-all"
+                                >
+                                    Reintentar
+                                </button>
+                                <button
+                                    onClick={handleFlowReturn}
+                                    className="text-sm text-gray-500 hover:text-[#00305B] font-semibold transition-colors"
+                                >
+                                    Ir al Dashboard de todas formas
+                                </button>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="bg-white rounded-3xl shadow-2xl p-10 md:p-14 max-w-sm w-full text-center">
+                            <div className="w-20 h-20 rounded-full bg-[#00A86B]/10 flex items-center justify-center mx-auto">
+                                <CheckCircle2 className="w-10 h-10 text-[#00A86B]" />
+                            </div>
+                            <h3 className="text-xl font-black text-[#00305B] mt-6 mb-2">
+                                ¡Pago exitoso!
+                            </h3>
+                            <p className="text-gray-500 text-sm">
+                                Tu pago ha sido procesado correctamente. Ya puedes disfrutar de todos
+                                los beneficios de tu plan.
+                            </p>
+                            <button
+                                onClick={handleFlowReturn}
+                                className="mt-8 w-full py-3.5 rounded-xl bg-gradient-to-r from-[#00A86B] to-[#009960] text-white font-bold shadow-lg shadow-[#00A86B]/30 hover:shadow-xl hover:shadow-[#00A86B]/40 transition-all"
+                            >
+                                Ir al Dashboard
+                            </button>
+                        </div>
+                    )}
+                </div>
+            </main>
+        );
+    }
+
+    // ── Sin planId → Dashboard ──
+    if (!planId) {
+        if (!usuario) {
+            return (
+                <main className="min-h-screen bg-[#f8f9fb] flex flex-col">
+                    <TopNavBarUser />
+                    <div className="flex-1 flex items-center justify-center">
+                        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-[#F28C28]" />
+                    </div>
+                </main>
+            );
+        }
+        return (
+            <main className="min-h-screen bg-[#f8f9fb] flex flex-col">
+                <TopNavBarUser />
+                <PagosDashboard onNavigateCompra={() => {}} userId={usuario.id} />
+            </main>
+        );
+    }
+
+    if (loading) {
+        return (
+            <main className="min-h-screen bg-[#f8f9fb] flex flex-col">
+                <TopNavBarUser />
+                <div className="flex-1 flex items-center justify-center">
+                    <div className="flex flex-col items-center gap-4">
+                        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-[#F28C28]" />
+                        <p className="text-gray-500 font-medium">Cargando información del plan...</p>
+                    </div>
+                </div>
+            </main>
+        );
+    }
+
+    if (!plan) {
+        return (
+            <main className="min-h-screen bg-[#f8f9fb] flex flex-col">
+                <TopNavBarUser />
+                <div className="flex-1 flex items-center justify-center px-6">
+                    <div className="bg-white rounded-3xl shadow-xl p-12 max-w-md text-center">
+                        <AlertCircle className="w-16 h-16 text-red-400 mx-auto mb-4" />
+                        <h2 className="text-2xl font-black text-[#00305B] mb-2">
+                            Plan no encontrado
+                        </h2>
+                        <p className="text-gray-500 mb-6">
+                            El plan seleccionado no existe o ha sido eliminado.
+                        </p>
+                        <button
+                            onClick={handleBackToDashboard}
+                            className="inline-flex items-center gap-2 bg-[#F28C28] hover:bg-[#e07d1f] text-white px-8 py-3 rounded-xl font-bold transition-all"
+                        >
+                            Volver al dashboard
+                        </button>
+                    </div>
+                </div>
+            </main>
+        );
+    }
+
+    if (tienePlanActivo) {
+        return (
+            <main className="min-h-screen bg-[#f8f9fb] flex flex-col">
+                <TopNavBarUser />
+                <div className="flex-1 flex items-center justify-center px-6">
+                    <div className="bg-white rounded-3xl shadow-xl p-12 max-w-md text-center">
+                        <div className="w-16 h-16 rounded-full bg-[#F28C28]/10 flex items-center justify-center mx-auto mb-4">
+                            <Crown className="w-8 h-8 text-[#F28C28]" />
+                        </div>
+                        <h2 className="text-2xl font-black text-[#00305B] mb-2">
+                            Ya tienes un plan activo
+                        </h2>
+                        <p className="text-gray-500 mb-2">
+                            Tienes el plan <span className="font-bold text-[#00305B] capitalize">{plan.nombre}</span> activo para este mes.
+                        </p>
+                        <p className="text-sm text-gray-400 mb-6">
+                            No puedes comprar otro plan hasta que termine el período actual.
+                        </p>
+                        <button
+                            onClick={handleBackToDashboard}
+                            className="inline-flex items-center gap-2 bg-[#F28C28] hover:bg-[#e07d1f] text-white px-8 py-3 rounded-xl font-bold transition-all"
+                        >
+                            Ir al Dashboard
+                        </button>
+                    </div>
+                </div>
+            </main>
+        );
+    }
+
+    return (
+        <main className="min-h-screen bg-[#f8f9fb] flex flex-col">
+            <TopNavBarUser />
+            <CheckoutView plan={plan} onBack={handleBackToDashboard} />
+        </main>
+    );
+}

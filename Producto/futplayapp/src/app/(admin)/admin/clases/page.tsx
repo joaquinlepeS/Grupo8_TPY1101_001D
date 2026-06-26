@@ -1,0 +1,669 @@
+"use client";
+
+import { useEffect, useState, useCallback } from "react";
+import {
+  Plus,
+  Pencil,
+  Trash2,
+  Loader2,
+  Search,
+  X,
+  Check,
+  ChevronLeft,
+  Users,
+  PersonStanding,
+  CalendarDays,
+} from "lucide-react";
+import {
+  getClases,
+  getSedes,
+  createClase,
+  updateClase,
+  deleteClase,
+  getAsistenciaPorClase,
+  registrarAsistencia,
+  type ClaseConRelaciones,
+  type Sede,
+} from "@/data/clases";
+import { getProfesoresDropdown, type ProfesorDropdown } from "@/data/profesores";
+import ConfirmDialog from "@/components/admin/ConfirmDialog";
+
+type ViewMode = "list" | "asistencia-detalle";
+
+const DIAS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
+
+type ModalMode = "create" | "edit" | null;
+
+type ClaseForm = {
+  id?: string;
+  titulo: string;
+  descripcion: string;
+  sede_id: string;
+  cupo_maximo: number;
+  profesor_id: string;
+  fecha: string;
+  hora: string;
+};
+
+const emptyForm: ClaseForm = {
+  titulo: "",
+  descripcion: "",
+  sede_id: "",
+  cupo_maximo: 15,
+  profesor_id: "",
+  fecha: "",
+  hora: "",
+};
+
+export default function ClasesPage() {
+  const [clases, setClases] = useState<ClaseConRelaciones[]>([]);
+  const [sedes, setSedes] = useState<Sede[]>([]);
+  const [profesores, setProfesores] = useState<ProfesorDropdown[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [view, setView] = useState<ViewMode>("list");
+  const [modal, setModal] = useState<ModalMode>(null);
+  const [form, setForm] = useState<ClaseForm>(emptyForm);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+
+  const [detalleClase, setDetalleClase] = useState<any>(null);
+  const [fechaDesde, setFechaDesde] = useState("");
+  const [fechaHasta, setFechaHasta] = useState("");
+  const [diasFiltro, setDiasFiltro] = useState<number[]>([]);
+
+  const fetchClases = useCallback(async () => {
+    const [c, s, p] = await Promise.all([getClases(), getSedes(), getProfesoresDropdown()]);
+    setClases(c);
+    setSedes(s);
+    setProfesores(p);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { fetchClases(); }, [fetchClases]);
+
+  const filtered = clases.filter((c) => {
+    const matchSearch =
+      c.titulo.toLowerCase().includes(search.toLowerCase()) ||
+      c.sede_nombre.toLowerCase().includes(search.toLowerCase());
+    if (!matchSearch) return false;
+
+    if (c.fecha_hora) {
+      const fecha = new Date(c.fecha_hora);
+      if (fechaDesde && fecha < new Date(fechaDesde)) return false;
+      if (fechaHasta) {
+        const hasta = new Date(fechaHasta);
+        hasta.setHours(23, 59, 59);
+        if (fecha > hasta) return false;
+      }
+      if (diasFiltro.length > 0 && !diasFiltro.includes(fecha.getDay())) return false;
+    } else {
+      if (fechaDesde || fechaHasta || diasFiltro.length > 0) return false;
+    }
+
+    return true;
+  });
+
+  const resetForm = () => { setForm(emptyForm); setError(null); };
+
+  const openCreate = () => {
+    resetForm();
+    setModal("create");
+  };
+
+  const openEdit = (c: ClaseConRelaciones) => {
+    const dt = c.fecha_hora?.slice(0, 16) || "";
+    const [fecha, hora] = dt.split("T");
+    setForm({
+      id: c.id,
+      titulo: c.titulo,
+      descripcion: c.descripcion,
+      sede_id: c.sede_id,
+      cupo_maximo: c.cupo_maximo,
+      profesor_id: c.profesor_id || "",
+      fecha: fecha || "",
+      hora: hora || "",
+    });
+    setModal("edit");
+  };
+
+  const handleSave = async () => {
+    if (!form.titulo || !form.sede_id) {
+      setError("Título y sede son obligatorios");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+
+    const fecha_hora = form.fecha && form.hora ? `${form.fecha}T${form.hora}` : undefined;
+    const fecha_hora_local: string | null = fecha_hora ?? null;
+    const base: any = {
+      titulo: form.titulo,
+      descripcion: form.descripcion,
+      sede_id: form.sede_id,
+      cupo_maximo: form.cupo_maximo,
+      profesor_id: form.profesor_id,
+    };
+    if (fecha_hora) base.fecha_hora = fecha_hora;
+
+    const res = modal === "create"
+      ? await createClase(base)
+      : await updateClase({ ...base, id: form.id! });
+
+    if (!res.success) {
+      setError(res.error || "Error al guardar");
+      setSaving(false);
+      return;
+    }
+
+    setSaving(false);
+    setModal(null);
+    resetForm();
+    if (modal === "create") {
+      fetchClases();
+    } else {
+      setClases((prev) =>
+        prev.map((c) =>
+          c.id === form.id
+            ? { ...c, titulo: form.titulo, descripcion: form.descripcion, sede_id: form.sede_id, cupo_maximo: form.cupo_maximo, profesor_id: form.profesor_id, fecha_hora: fecha_hora_local }
+            : c
+        )
+      );
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    setDeleteId(null);
+    setClases((prev) => prev.filter((c) => c.id !== id));
+    await deleteClase(id);
+  };
+
+  const handleAsistenciaClase = async (claseId: string) => {
+    setLoading(true);
+    const data = await getAsistenciaPorClase(claseId);
+    setDetalleClase(data);
+    setView("asistencia-detalle");
+    setLoading(false);
+  };
+
+  const toggleAsistencia = async (usuarioId: string, asistencia: boolean) => {
+    if (!detalleClase) return;
+    await registrarAsistencia(detalleClase.clase.id, usuarioId, asistencia);
+    setDetalleClase((prev: any) => ({
+      ...prev,
+      inscripciones: prev.inscripciones.map((i: any) =>
+        i.usuario_id === usuarioId ? { ...i, asistencia: asistencia ? "asistio" : "no_asistio" } : i
+      ),
+    }));
+  };
+
+  const formatFecha = (f: string) => {
+    const d = new Date(f);
+    return d.toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "numeric" });
+  };
+
+  const formatHora = (f: string) => {
+    const d = new Date(f);
+    return d.toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" });
+  };
+
+  if (loading && clases.length === 0 && view === "list") {
+    return (
+    <>
+    <div className="flex items-center justify-center min-h-[60vh]">
+      <Loader2 className="w-5 h-5 animate-spin text-[#F28C28]" />
+    </div>
+
+      <ConfirmDialog
+        open={deleteId !== null}
+        title="Eliminar clase"
+        message="¿Eliminar esta clase? También se eliminarán sus inscripciones."
+        onConfirm={() => deleteId && handleDelete(deleteId)}
+        onCancel={() => setDeleteId(null)}
+      />
+    </>
+  );
+}
+
+  return (
+    <>
+    <div className="p-6">
+      <div className="flex flex-col gap-6 w-full" style={{ maxWidth: "1216px" }}>
+
+        {/* ─── HEADER ─── */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-extrabold text-gray-900">Gestión de Clases</h1>
+            <p className="text-gray-500 text-sm mt-1">Administra clases, sedes y cupos</p>
+          </div>
+          <div className="flex gap-3">
+            {view !== "list" && (
+              <button
+                onClick={() => { setView("list"); setDetalleClase(null); }}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50"
+              >
+                <ChevronLeft size={16} />
+                Volver
+              </button>
+            )}
+            {view === "list" ? (
+              <button
+                onClick={openCreate}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+              >
+                <Plus size={16} />
+                Nueva Clase
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        {/* ─── VIEW: LIST ─── */}
+        {view === "list" && (
+          <div className="bg-white rounded-xl border border-gray-200">
+            {/* ─── FILTROS ─── */}
+            <div className="p-4 border-b border-gray-100 space-y-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="relative flex-1 min-w-[200px] max-w-xs">
+                  <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                  <input
+                    type="text"
+                    placeholder="Buscar clase o sede..."
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400"
+                  />
+                </div>
+                <div className="flex items-center gap-2 text-sm">
+                  <label className="text-gray-500 font-medium">Desde:</label>
+                  <input
+                    type="date"
+                    value={fechaDesde}
+                    onChange={(e) => setFechaDesde(e.target.value)}
+                    className="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400"
+                  />
+                </div>
+                <div className="flex items-center gap-2 text-sm">
+                  <label className="text-gray-500 font-medium">Hasta:</label>
+                  <input
+                    type="date"
+                    value={fechaHasta}
+                    onChange={(e) => setFechaHasta(e.target.value)}
+                    className="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400"
+                  />
+                </div>
+                {(fechaDesde || fechaHasta || diasFiltro.length > 0) && (
+                  <button
+                    onClick={() => { setFechaDesde(""); setFechaHasta(""); setDiasFiltro([]); }}
+                    className="text-xs text-red-500 hover:text-red-700 font-semibold"
+                  >
+                    Limpiar filtros
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <CalendarDays size={14} className="text-gray-400" />
+                {DIAS.map((nombre, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() =>
+                      setDiasFiltro((prev) =>
+                        prev.includes(idx) ? prev.filter((d) => d !== idx) : [...prev, idx]
+                      )
+                    }
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+                      diasFiltro.includes(idx)
+                        ? "bg-blue-600 text-white border-blue-600"
+                        : "bg-white text-gray-500 border-gray-200 hover:border-blue-300"
+                    }`}
+                  >
+                    {nombre}
+                  </button>
+                ))}
+                <span className="text-sm text-gray-400 ml-auto">{filtered.length} clase{filtered.length !== 1 ? "s" : ""}</span>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-500 border-b bg-gray-50/50">
+                    <th className="p-3 font-semibold">Nombre</th>
+                    <th className="p-3 font-semibold">Profesor</th>
+                    <th className="p-3 font-semibold">Sede</th>
+                    <th className="p-3 font-semibold">Inscritos</th>
+                    <th className="p-3 font-semibold">Asistencia</th>
+                    <th className="p-3 font-semibold">Fecha</th>
+                    <th className="p-3 font-semibold">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="p-8 text-center text-gray-400">
+                        {search || fechaDesde || fechaHasta || diasFiltro.length > 0
+                          ? "No se encontraron clases con esos filtros"
+                          : "No hay clases creadas aún"}
+                      </td>
+                    </tr>
+                  ) : filtered.map((c) => {
+                    return (
+                      <tr
+                        key={c.id}
+                        className="border-b hover:bg-blue-50/50 cursor-pointer transition-colors"
+                        onClick={() => handleAsistenciaClase(c.id)}
+                      >
+                        <td className="p-3">
+                          <p className="font-semibold text-gray-900">{c.titulo}</p>
+                          {c.descripcion && (
+                            <p className="text-xs text-gray-400 truncate max-w-[200px]">{c.descripcion}</p>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          {c.profesor_nombre ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-orange-50 text-orange-700 rounded-full text-xs font-semibold">
+                              <PersonStanding size={12} />
+                              {c.profesor_nombre}
+                            </span>
+                          ) : (
+                            <span className="text-gray-300">—</span>
+                          )}
+                        </td>
+                        <td className="p-3 text-gray-600">{c.sede_nombre}</td>
+                        <td className="p-3">
+                          <span className={`font-semibold ${c.inscritos >= c.cupo_maximo ? "text-red-500" : "text-green-600"}`}>
+                            {c.inscritos}
+                          </span>
+                          <span className="text-gray-400">/{c.cupo_maximo}</span>
+                        </td>
+                        <td className="p-3">
+                          <div className="flex items-center gap-2 text-xs" onClick={(e) => e.stopPropagation()}>
+                            <span className="text-green-600 font-semibold">{c.presentes} ✓</span>
+                            <span className="text-red-500 font-semibold">{c.ausentes} ✗</span>
+                            {c.pendientes > 0 ? (
+                              <button
+                                onClick={() => handleAsistenciaClase(c.id)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-100 text-amber-800 rounded-full text-xs font-bold hover:bg-amber-200 hover:animate-none transition-colors border border-amber-300 animate-pulse"
+                              >
+                                {c.pendientes} Pendientes
+                              </button>
+                            ) : (
+                              <span className="text-gray-300 font-semibold">—</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="p-3">
+                          {c.fecha_hora ? (
+                            <div className="text-xs text-gray-600">
+                              <span className="font-medium">{formatFecha(c.fecha_hora)}</span>
+                              <br />
+                              <span className="text-gray-400">{formatHora(c.fecha_hora)}</span>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-gray-400">Sin horario</span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              onClick={() => openEdit(c)}
+                              className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg"
+                              title="Editar"
+                            >
+                              <Pencil size={16} />
+                            </button>
+                            <button
+                              onClick={() => setDeleteId(c.id)}
+                              className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg"
+                              title="Eliminar"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ─── VIEW: ASISTENCIA DETALLE ─── */}
+        {view === "asistencia-detalle" && detalleClase && (
+          <AsistenciaDetalle
+            data={detalleClase}
+            onToggle={toggleAsistencia}
+          />
+        )}
+
+      </div>
+
+      {/* ─── MODAL CREATE/EDIT ─── */}
+      {modal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl w-full max-w-lg p-6 shadow-xl">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-xl font-bold text-gray-900">
+                {modal === "create" ? "Nueva Clase" : "Editar Clase"}
+              </h2>
+              <button onClick={() => { setModal(null); resetForm(); }} className="p-1 hover:bg-gray-100 rounded-lg">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Título *</label>
+                <input
+                  type="text"
+                  value={form.titulo}
+                  onChange={(e) => setForm((p) => ({ ...p, titulo: e.target.value }))}
+                  className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400"
+                  placeholder="Ej: Entrenamiento Técnico"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Descripción</label>
+                <textarea
+                  value={form.descripcion}
+                  onChange={(e) => setForm((p) => ({ ...p, descripcion: e.target.value }))}
+                  className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400 resize-none"
+                  rows={2}
+                  placeholder="Descripción opcional"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">Sede *</label>
+                  <select
+                    value={form.sede_id}
+                    onChange={(e) => setForm((p) => ({ ...p, sede_id: e.target.value }))}
+                    className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400"
+                  >
+                    <option value="">Seleccionar sede</option>
+                    {sedes.map((s) => (
+                      <option key={s.id} value={s.id}>{s.nombre}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">Cupo Máximo</label>
+                  <input
+                    type="number"
+                    value={form.cupo_maximo}
+                    onChange={(e) => setForm((p) => ({ ...p, cupo_maximo: parseInt(e.target.value) || 1 }))}
+                    className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400"
+                    min={1}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Profesor</label>
+                <select
+                  value={form.profesor_id}
+                  onChange={(e) => setForm((p) => ({ ...p, profesor_id: e.target.value }))}
+                  className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400"
+                >
+                  <option value="">Sin profesor asignado</option>
+                  {profesores.map((pr) => (
+                    <option key={pr.id} value={pr.id}>{pr.nombre}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">Fecha</label>
+                  <input
+                    type="date"
+                    value={form.fecha}
+                    onChange={(e) => setForm((p) => ({ ...p, fecha: e.target.value }))}
+                    className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">Hora</label>
+                  <input
+                    type="time"
+                    value={form.hora}
+                    onChange={(e) => setForm((p) => ({ ...p, hora: e.target.value }))}
+                    className="w-full px-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400"
+                  />
+                </div>
+              </div>
+
+              {error && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm">{error}</div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-gray-100">
+              <button
+                onClick={() => { setModal(null); resetForm(); }}
+                disabled={saving}
+                className="px-4 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {saving && <Loader2 size={14} className="animate-spin" />}
+                {modal === "create" ? "Crear Clase" : "Guardar Cambios"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+
+      <ConfirmDialog
+        open={deleteId !== null}
+        title="Eliminar clase"
+        message="¿Eliminar esta clase? También se eliminarán sus inscripciones."
+        onConfirm={() => deleteId && handleDelete(deleteId)}
+        onCancel={() => setDeleteId(null)}
+      />
+    </>
+  );
+}
+
+/* ─── ASISTENCIA DETALLE ─── */
+function AsistenciaDetalle({
+  data,
+  onToggle,
+}: {
+  data: any;
+  onToggle: (usuarioId: string, asistencia: boolean) => void;
+}) {
+  const { clase, inscripciones } = data;
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200">
+      <div className="p-4 border-b border-gray-100">
+        <h2 className="text-lg font-bold text-gray-900">{clase.titulo}</h2>
+        <p className="text-sm text-gray-500 mt-1">
+          Cupo: {inscripciones.length}/{clase.cupo_maximo}
+          {clase.fecha_hora ? (
+            <> · {new Date(clase.fecha_hora).toLocaleDateString("es-CL", {
+              day: "2-digit", month: "short", year: "numeric",
+            })} {new Date(clase.fecha_hora).toLocaleTimeString("es-CL", {
+              hour: "2-digit", minute: "2-digit",
+            })}</>
+          ) : (
+            " · Sin horario"
+          )}
+        </p>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-gray-500 border-b bg-gray-50/50">
+              <th className="p-3 font-semibold">Alumno</th>
+              <th className="p-3 font-semibold">Asistencia</th>
+              <th className="p-3 font-semibold">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {inscripciones.length === 0 ? (
+              <tr><td colSpan={3} className="p-8 text-center text-gray-400">No hay alumnos inscritos en esta clase</td></tr>
+            ) : inscripciones.map((ins: any) => (
+              <tr key={ins.id} className="border-b hover:bg-gray-50/50">
+                <td className="p-3 font-medium text-gray-900">{ins.usuario_nombre}</td>
+                <td className="p-3">
+                  {ins.asistencia === "asistio" ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-semibold">
+                      <Check size={12} /> Presente
+                    </span>
+                  ) : ins.asistencia === "no_asistio" ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 text-red-700 rounded-full text-xs font-semibold">
+                      <X size={12} /> Ausente
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full text-xs font-semibold">
+                      Pendiente
+                    </span>
+                  )}
+                </td>
+                <td className="p-3">
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => onToggle(ins.usuario_id, true)}
+                      className="px-3 py-1 bg-green-500 text-white rounded-lg text-xs hover:bg-green-600 font-semibold"
+                    >
+                      <Check size={14} className="inline" /> Presente
+                    </button>
+                    <button
+                      onClick={() => onToggle(ins.usuario_id, false)}
+                      className="px-3 py-1 bg-red-500 text-white rounded-lg text-xs hover:bg-red-600 font-semibold"
+                    >
+                      <X size={14} className="inline" /> Ausente
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="p-3 border-t border-gray-100 flex items-center gap-4 text-sm">
+        <Users size={16} className="text-gray-400" />
+        <span className="text-gray-600">
+          <strong className="text-green-600">{inscripciones.filter((i: any) => i.asistencia === "asistio").length}</strong> presentes ·{" "}
+          <strong className="text-red-500">{inscripciones.filter((i: any) => i.asistencia === "no_asistio").length}</strong> ausentes ·{" "}
+          <strong className="text-gray-400">{inscripciones.filter((i: any) => i.asistencia !== "asistio" && i.asistencia !== "no_asistio").length}</strong> pendientes
+        </span>
+      </div>
+    </div>
+  );
+}
