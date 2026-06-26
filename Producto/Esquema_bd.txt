@@ -1,0 +1,175 @@
+-- WARNING: This schema is for context only and is not meant to be run.
+-- Table order and constraints may not be valid for execution.
+
+CREATE TABLE public.sede (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  nombre text NOT NULL UNIQUE,
+  CONSTRAINT sede_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.usuario (
+  id uuid NOT NULL,
+  nombre text,
+  created_at timestamp without time zone DEFAULT now(),
+  email text NOT NULL DEFAULT 'NOT NULL'::text UNIQUE,
+  rol USER-DEFINED DEFAULT 'jugador'::rol_usuario,
+  telefono text UNIQUE,
+  rut text,
+  foto_url text,
+  CONSTRAINT usuario_pkey PRIMARY KEY (id),
+  CONSTRAINT usuario_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id)
+);
+CREATE TABLE public.clase (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  sede_id uuid,
+  cupo_maximo integer DEFAULT 15,
+  created_at timestamp without time zone DEFAULT now(),
+  titulo text DEFAULT 'Clase'::text,
+  descripcion text,
+  profesor_id uuid,
+  fecha_hora timestamp without time zone,
+  CONSTRAINT clase_pkey PRIMARY KEY (id),
+  CONSTRAINT clase_sede_id_fkey FOREIGN KEY (sede_id) REFERENCES public.sede(id),
+  CONSTRAINT clase_profesor_id_fkey FOREIGN KEY (profesor_id) REFERENCES public.usuario(id)
+);
+CREATE TABLE public.clase_usuario (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  usuario_id uuid,
+  created_at timestamp without time zone DEFAULT now(),
+  asistencia USER-DEFINED DEFAULT 'sin_confirmar'::asistencia,
+  clase_id uuid,
+  CONSTRAINT clase_usuario_pkey PRIMARY KEY (id),
+  CONSTRAINT clase_usuario_usuario_id_fkey FOREIGN KEY (usuario_id) REFERENCES public.usuario(id),
+  CONSTRAINT clase_usuario_clase_id_fkey FOREIGN KEY (clase_id) REFERENCES public.clase(id)
+);
+CREATE TABLE public.plan (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  nombre text NOT NULL UNIQUE,
+  tokens_mensuales integer NOT NULL,
+  precio integer,
+  created_at timestamp without time zone DEFAULT now(),
+  CONSTRAINT plan_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.boleta (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  usuario_id uuid NOT NULL,
+  estado text NOT NULL CHECK (estado = ANY (ARRAY['pendiente'::text, 'pagado'::text, 'rechazado'::text, 'anulado'::text])),
+  total integer NOT NULL DEFAULT 0,
+  transaccion_id text,
+  created_at timestamp without time zone DEFAULT now(),
+  updated_at timestamp without time zone DEFAULT now(),
+  recurrencia_id uuid,
+  flow_confirmada boolean DEFAULT false,
+  CONSTRAINT boleta_pkey PRIMARY KEY (id),
+  CONSTRAINT boleta_usuario_id_fkey FOREIGN KEY (usuario_id) REFERENCES public.usuario(id),
+  CONSTRAINT boleta_recurrencia_id_fkey FOREIGN KEY (recurrencia_id) REFERENCES public.recurrencia(id)
+);
+CREATE TABLE public.membresia (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  usuario_id uuid NOT NULL,
+  plan_id uuid NOT NULL,
+  mes date NOT NULL,
+  tokens_totales integer NOT NULL DEFAULT 0,
+  tokens_usados integer NOT NULL DEFAULT 0,
+  created_at timestamp without time zone DEFAULT now(),
+  estado boolean NOT NULL DEFAULT true,
+  CONSTRAINT membresia_pkey PRIMARY KEY (id),
+  CONSTRAINT membresia_usuario_id_fkey FOREIGN KEY (usuario_id) REFERENCES public.usuario(id),
+  CONSTRAINT membresia_plan_id_fkey FOREIGN KEY (plan_id) REFERENCES public.plan(id)
+);
+CREATE TABLE public.producto (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  nombre text,
+  tipo text CHECK (tipo = ANY (ARRAY['plan'::text, 'merch'::text, 'token_extra'::text])),
+  precio integer NOT NULL,
+  CONSTRAINT producto_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.boleta_item (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  boleta_id uuid,
+  producto_id uuid,
+  cantidad integer NOT NULL DEFAULT 1,
+  precio integer NOT NULL,
+  total integer NOT NULL,
+  plan_id uuid,
+  CONSTRAINT boleta_item_pkey PRIMARY KEY (id),
+  CONSTRAINT boleta_item_boleta_id_fkey FOREIGN KEY (boleta_id) REFERENCES public.boleta(id),
+  CONSTRAINT boleta_item_producto_id_fkey FOREIGN KEY (producto_id) REFERENCES public.producto(id),
+  CONSTRAINT boleta_item_plan_id_fkey FOREIGN KEY (plan_id) REFERENCES public.plan(id)
+);
+CREATE TABLE public.modulo (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  nombre text NOT NULL,
+  created_at timestamp with time zone DEFAULT now(),
+  duracion interval,
+  descripcion text NOT NULL,
+  categoria_id uuid,
+  CONSTRAINT modulo_pkey PRIMARY KEY (id),
+  CONSTRAINT modulo_categoria_id_fkey FOREIGN KEY (categoria_id) REFERENCES public.categoria(id)
+);
+CREATE TABLE public.capsula (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  titulo text NOT NULL,
+  modulo_id uuid,
+  duracion interval,
+  order_index integer,
+  created_at timestamp with time zone DEFAULT now(),
+  descripcion text,
+  creado text,
+  imagen text,
+  bunny_video_id text,
+  profesor_id uuid,
+  CONSTRAINT capsula_pkey PRIMARY KEY (id),
+  CONSTRAINT capsulas_modulo_id_fkey FOREIGN KEY (modulo_id) REFERENCES public.modulo(id),
+  CONSTRAINT capsula_profesor_id_fkey FOREIGN KEY (profesor_id) REFERENCES public.usuario(id)
+);
+CREATE TABLE public.categoria (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  nombre text NOT NULL UNIQUE,
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT categoria_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.ficha_medica (
+  usuario_id uuid NOT NULL,
+  peso_kg numeric,
+  estatura_cm integer,
+  grupo_sanguineo text,
+  enfermedades text DEFAULT 'Ninguna'::text,
+  alergias text DEFAULT 'Ninguna'::text,
+  medicamentos text,
+  observaciones text,
+  updated_at timestamp without time zone DEFAULT now(),
+  imc real,
+  fecha_nacimiento date,
+  CONSTRAINT ficha_medica_pkey PRIMARY KEY (usuario_id),
+  CONSTRAINT ficha_medica_usuario_id_fkey FOREIGN KEY (usuario_id) REFERENCES public.usuario(id)
+);
+CREATE TABLE public.recurrencia (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  usuario_id uuid NOT NULL,
+  plan_id uuid NOT NULL,
+  activa boolean DEFAULT true,
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT recurrencia_pkey PRIMARY KEY (id),
+  CONSTRAINT recurrencia_usuario_id_fkey FOREIGN KEY (usuario_id) REFERENCES public.usuario(id),
+  CONSTRAINT recurrencia_plan_id_fkey FOREIGN KEY (plan_id) REFERENCES public.plan(id)
+);
+CREATE TABLE public.comentario (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  capsula_id uuid NOT NULL,
+  usuario_id uuid NOT NULL,
+  contenido text NOT NULL,
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT comentario_pkey PRIMARY KEY (id),
+  CONSTRAINT comentario_capsula_id_fkey FOREIGN KEY (capsula_id) REFERENCES public.capsula(id),
+  CONSTRAINT comentario_usuario_id_fkey FOREIGN KEY (usuario_id) REFERENCES public.usuario(id)
+);
+CREATE TABLE public.documento (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  capsula_id uuid NOT NULL,
+  nombre text NOT NULL,
+  url_archivo text NOT NULL,
+  tipo_archivo text,
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT documento_pkey PRIMARY KEY (id),
+  CONSTRAINT documento_capsula_id_fkey FOREIGN KEY (capsula_id) REFERENCES public.capsula(id)
+);
